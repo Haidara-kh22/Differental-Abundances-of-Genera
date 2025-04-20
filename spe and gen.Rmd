@@ -1,0 +1,560 @@
+---
+title: "upsets"
+output: html_document
+date: "2025-03-16"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(ComplexHeatmap)
+library(ggplot2)
+library(plotly)
+library(dplyr)
+library(DESeq2)
+library(phyloseq)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(VennDiagram)
+library(ALDEx2)
+library(radEmu)
+library(ggpubr)
+library(ggvenn)
+library(pheatmap)
+```
+
+
+```{r}
+setwd("~/alt/alt/11g")
+
+```
+
+data_loading 
+
+```{r}
+source_file<- read.delim("source1.txt", header= T, row.names = 1, sep = "\t")
+metadata <- source_file[, (ncol(source_file) - 1):ncol(source_file)]
+assay<- source_file[, -c((ncol(source_file) - 1):ncol(source_file))]
+#metadata<- source_file[,c(1,2)]
+#assay<- source_file[,-c(1,2)]
+assay1<- t(assay)
+all(rownames(metadata)%in%colnames(assay1))
+r_a<- rownames(assay1)
+assay1 <- matrix(as.numeric(assay1), nrow = nrow(assay1))
+rownames(assay1)<- r_a
+colnames(assay1)<- rownames(metadata)
+assay1[is.na(assay1)]<-0
+
+# RENAMING the taxa
+taxa_names <- c(rownames(assay1))
+
+# Removing unwanted characters (like "EUPATH_0009353")
+taxa_cleaned <- gsub("EUPATH.*", "", taxa_names)
+head(taxa_cleaned)
+rownames(assay1)<-taxa_cleaned
+# Splitting taxa by delimiters
+taxa_split <- strsplit(taxa_cleaned, "[_.]+")
+
+keep <- rowSums(assay1 >= 5) >= 2
+assay1_filtered <- assay1[keep, ]
+
+# Writting down counts and metadata after organizing them to run ANCOM-BC using QIIME2 on linux
+###################
+write.csv(assay1_filtered,file = "feature_table.csv")
+write.csv(metadata, file = "sample_metadata.csv")
+###################
+
+assay1<-round(assay1)
+assay1<- assay1+1
+
+colnames(metadata)[colnames(metadata)=="study_condition..MBIOTEMP_study_condition."]<- "condition"
+colnames(metadata)
+
+#this step is for designing the study to be between two conditions:
+metadata$condition <- ifelse(metadata$condition == "control", "control", "Tumor")
+cond<- metadata$condition
+```
+
+
+```{r}
+# Filtering out low-abundance features (similar to DESeq2)
+keep <- rowSums(assay1 >= 5) >= 2
+assay1_filtered <- assay1[keep, ]
+
+# Performing ALDEx2 transformation using clr normalization
+aldex_data <- aldex.clr(assay1_filtered, cond, denom="iqlr", verbose=TRUE)
+
+# Running differential abundance analysis (Wilcoxon test for two conditions)
+aldex_results <- aldex.ttest(aldex_data)
+
+# Computing effect sizes
+effect_sizes <- aldex.effect(aldex_data)
+
+# Merging results into a single dataframe
+aldex_output <- data.frame(aldex_results, effect_sizes)
+
+# Orderin by p-value
+aldex_output <- aldex_output[order(aldex_output$we.ep), ]
+# Computing approximate fold change
+aldex_output$fold_change <- 2^aldex_output$diff.btw
+
+# results
+write.csv(aldex_output, file = "aldex_results.csv", row.names = TRUE)
+```
+
+
+```{r}
+#radEMU
+?otu
+otu_table <- otu_table(assay1, taxa_are_rows = TRUE)
+sample_data <- sample_data(metadata)
+physeq <- phyloseq(otu_table, sample_data)
+
+#filteration
+physeq <- filter_taxa(physeq, function(x) sum(x >= 5) >= 2, TRUE)
+
+#running DAGs analysis
+ch_fit <- emuFit(formula = ~ condition, 
+                 Y = physeq) 
+
+plot(ch_fit)
+x<-ch_fit$coef
+x<-x[order(x$pval),]
+write.csv(x, file = "rademu_results.csv")
+```
+
+
+```{r}
+###deseq2
+
+dds<-DESeqDataSetFromMatrix(countData = assay1,
+                            colData = metadata,
+                            design = ~condition)
+dds$condition<-as.factor(dds$condition)
+dds$condition<- relevel(dds$condition,ref = "control")
+keep<- rowSums(counts(dds)>=5)>=2
+dds1<- dds[keep,]
+f<-counts(dds1)
+dds1<-DESeq(dds1)
+res<-results(dds1,alpha = 0.05)
+res<-res[order(res$pvalue),]
+write.csv(res,file = "primary1.csv")
+
+```
+
+Reloading all the results:
+
+```{r}
+#deseq2
+resa_df<- read.csv("primary1.csv",header = T)
+rownames(resa_df)<- resa_df$X
+sub_resa100<-head(resa_df, 100)
+sub_resa50<-head(resa_df, 50) # It defers based on the total number of filltered taxa
+des100<-sub_resa100$X
+des50<-sub_resa50$X
+
+#rademu
+rademu<- read.csv("rademu_results.csv",header=T)
+rademu$category<-make.unique(rademu$category)
+rownames(rademu)<-rademu$category
+colnames(rademu)[colnames(rademu)=="pval"]<- "pvalue"
+sub_rad100<- head(rademu,100 )
+sub_rad50<- head(rademu,50 )
+rad100<-sub_rad100$category
+rad50<-sub_rad50$category
+
+#aldex2
+aldex<-read.csv("aldex_results.csv", header = T)
+rownames(aldex)<-aldex$X
+colnames(aldex)[colnames(aldex)=="we.ep"]<-"pvalue"
+sub_ald100<- head(aldex, 100)
+sub_ald50<- head(aldex, 50)
+ald100<-sub_ald100$X
+ald50<-sub_ald50$X
+
+#ancombc
+ancomv<-read.csv("lfc_slice.csv", header = T)
+b<- sum(is.na(ancomv))
+rownames(ancomv)<-make.unique(ancomv$id)
+ancomv<-ancomv[order(ancomv$study_condition..MBIOTEMP_study_condition.cirrhosis.2),]
+sub_anc100<-head(ancomv, 100)
+sub_anc50<-head(ancomv, 50)
+anc100<-sub_anc100$id 
+anc50<-sub_anc50$id
+
+
+```
+
+
+```{r}
+# Extracting row names
+rows_assay1 <- rownames(assay1)
+rows_resa100 <- rownames(sub_resa50)
+rows_rad100 <- rownames(sub_rad50)
+rows_ald100 <- rownames(sub_ald50)
+
+# Find intersection
+intersected_rows <- Reduce(intersect, list(rows_resa100, rows_rad100, rows_ald100))
+assay1_intersected <- assay1[intersected_rows, ]
+
+# Find unique taxa for each tool
+unique_resa100 <- setdiff(setdiff(rows_resa100, rows_ald100), rows_rad100)
+sub_resa100_unique <- assay1[unique_resa100, ]
+
+unique_rad100 <- setdiff(setdiff(rows_rad100, rows_resa100), rows_ald100)
+sub_rad100_unique <- assay1[unique_rad100, ]
+
+unique_ald100 <- setdiff(setdiff(rows_ald100, rows_resa100), rows_rad100)
+sub_ald100_unique <- assay1[unique_ald100, ]
+
+# Generate plot title
+heatmap_title <- paste0(
+  "Intersected taxa: ", length(intersected_rows),
+  " | Unique DESeq2: ", length(unique_resa100),
+  " | Unique RADEMU: ", length(unique_rad100),
+  " | Unique ALDEX2: ", length(unique_ald100)
+)
+
+```
+
+
+```{r}
+setwd("D:/alt/alt/1/plots_deseq_radEmu_aldex2/11-species/")
+```
+
+```{r}
+
+
+# Intersected heatmap with title
+pheatmap(
+  assay1_intersected,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  width = 15,
+  height = 8,
+  dpi = 300,
+  filename = "heatmap_assay1_intersected.png",
+  main = heatmap_title
+)
+
+# Unique RESA
+pheatmap(
+  sub_resa100_unique,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  width = 15,
+  height = 8,
+  dpi = 300,
+  filename = "heatmap_sub_des_unique.png"
+)
+
+# Unique RADEMU
+pheatmap(
+  sub_rad100_unique,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  width = 15,
+  height = 8,
+  dpi = 300,
+  filename = "heatmap_sub_rad_unique.png"
+)
+
+# Unique ALDEX2
+pheatmap(
+  sub_ald100_unique,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  width = 15,
+  height = 8,
+  dpi = 300,
+  filename = "heatmap_sub_ald_unique.png"
+)
+
+```
+
+```{r}
+# For the intersected assay1 data
+pheatmap(assay1_intersected, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         width = 15, height = 8, dpi = 300,
+         filename = "heatmap_assay1_intersected.png")
+
+# For the unique sub_resa100 data
+pheatmap(sub_resa100_unique, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         width = 15, height = 8, dpi = 300,
+         filename = "heatmap_sub_des_unique.png")
+
+# For the unique sub_rad100 data
+pheatmap(sub_rad100_unique, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         width = 15, height = 8, dpi = 300,
+         filename = "heatmap_sub_rad_unique.png")
+
+# For the unique sub_ald100 data
+pheatmap(sub_ald100_unique, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         width = 15, height = 8, dpi = 300,
+         filename = "heatmap_sub_ald_unique.png")
+
+```
+
+
+
+```{r}
+# heatmap for the intersected data frames
+
+# For the intersected assay1 data
+png("heatmap_assay1_intersected.png", width = 1920*4, height = 1080*4, res = 600)
+pheatmap(assay1_intersected, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off()
+
+# For the unique sub_resa100 data
+png("heatmap_sub_des_unique.png", width = 1920*4, height = 1080*4, res = 600)
+pheatmap(sub_resa100_unique, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off()
+
+# For the unique sub_rad100 data
+png("heatmap_sub_rad_unique.png", width = 1920*4, height = 1080*4, res = 600)
+pheatmap(sub_rad100_unique, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off()
+
+# For the unique sub_ald100 data
+png("heatmap_sub_ald_unique.png", width = 1920*4, height = 1080*4, res = 600)
+pheatmap(sub_ald100_unique, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off()
+
+```
+
+
+UPset plot for 100
+```{r}
+# Combining all taxa into a unique list
+all_taxa100 <- unique(c(des100,anc100, rad100,ald100))
+
+# Creating a binary matrix indicating the presence of taxa in each method
+upset_data100 <- data.frame(
+    taxa = all_taxa100,
+    DESeq2 = all_taxa100 %in% des100,
+    ANCOMBC = all_taxa100 %in% anc100,
+    radEMU = all_taxa100 %in% rad100,
+    ALDEx2 = all_taxa100 %in% ald100
+)
+upset_data100[,-1] <- lapply(upset_data100[,-1], as.integer)
+
+methods <- c("DESeq2", "ANCOMBC", "radEMU", "ALDEx2")
+m100 = make_comb_mat(upset_data100, mode = 'intersect')
+U100<- UpSet(
+    m100,
+    set_order = c("DESeq2", "ANCOMBC", "radEMU", "ALDEx2"),
+    comb_order = order(comb_size(m100)),
+    top_annotation = HeatmapAnnotation(
+        "Intersection Size" = anno_barplot(
+            comb_size(m100),
+            ylim = c(0, 100),  # Adjust the maximum value as needed
+            border = FALSE,
+            gp = gpar(fill = "black"),
+            height = unit(3, "cm"),
+            axis_param = list(
+                side = "right",
+                at = c(0,10, 20, 30,40,50,60,70,80,90,100),  # Adjust tick marks as needed
+                labels = c("0","10", "20", "30","40","50","60","70","80","90","100")
+            )
+        ),
+        annotation_name_side = "left",
+        annotation_name_rot = 90
+    )
+)
+class(U100)
+png("U100.png", width = 1000, height = 644, res = 150)  # Adjust resolution (DPI)
+draw(U100)  # Render the heatmap
+dev.off()
+
+```
+
+for 50:
+```{r}
+# Combine all taxa into a unique list
+all_taxa50 <- unique(c(des50,anc50, rad50,ald50))
+
+# Create a binary matrix indicating the presence of taxa in each method
+upset_data50 <- data.frame(
+    taxa = all_taxa50,
+    DESeq2 = all_taxa50 %in% des50,
+    ANCOMBC = all_taxa50 %in% anc50,
+    radEMU = all_taxa50 %in% rad50,
+    ALDEx2 = all_taxa50 %in% ald50
+)
+upset_data50[,-1] <- lapply(upset_data50[,-1], as.integer)
+
+
+common_taxa <- upset_data50 %>%
+    filter(DESeq2 == 1 & ANCOMBC == 1 & radEMU == 1 & ALDEx2 == 1)
+
+print(common_taxa)
+
+
+methods <- c("DESeq2", "ANCOMBC", "radEMU", "ALDEx2")
+m50 = make_comb_mat(upset_data50, mode = 'intersect')
+U50<-UpSet(
+    m50,
+    set_order = c("DESeq2", "ANCOMBC", "radEMU", "ALDEx2"),
+    comb_order = order(comb_size(m50)),
+    top_annotation = HeatmapAnnotation(
+        "Intersection Size" = anno_barplot(
+            comb_size(m50),
+            ylim = c(0, 50),  
+            border = FALSE,
+            gp = gpar(fill = "black"),
+            height = unit(3, "cm"),
+            axis_param = list(
+                side = "right",
+                at = c(0, 5, 10, 15, 20, 25, 30,35,40,45,50),
+                labels = c("0","5", "10","15", "20","25", "30","35","40","45","50")
+            )
+        ),
+        annotation_name_side = "left",
+        annotation_name_rot = 90
+    )
+)
+png("U50.png", width = 1000, height = 644, res = 150) 
+draw(U50)  
+dev.off()
+
+```
+
+```{r}
+# Converting upset_data into sets for each method
+venn_list100 <- list(
+    DESeq2 = upset_data100$taxa[upset_data100$DESeq2 == 1],
+    ANCOMBC = upset_data100$taxa[upset_data100$ANCOMBC == 1],
+    radEMU = upset_data100$taxa[upset_data100$radEMU == 1],
+    ALDEx2 = upset_data100$taxa[upset_data100$ALDEx2 == 1]
+)
+
+# Creating the Venn diagram
+ggvenn(venn_list100, fill_color = c("blue", "red", "green", "purple"), stroke_size = 1, text_size = 5)
+V100<-ggvenn(venn_list100, fill_color = c("blue", "red", "green", "purple"), stroke_size = 1, text_size = 5)
+ggsave("V100.png", plot = V100, units = "px", width = 1920*4, height = 1080*4, dpi = 600)
+```
+
+for 50 
+```{r}
+venn_list50 <- list(
+    DESeq2 = upset_data50$taxa[upset_data50$DESeq2 == 1],
+    ANCOMBC = upset_data50$taxa[upset_data50$ANCOMBC == 1],
+    radEMU = upset_data50$taxa[upset_data50$radEMU == 1],
+    ALDEx2 = upset_data50$taxa[upset_data50$ALDEx2 == 1]
+)
+
+# Create the Venn diagram
+V50<-ggvenn(venn_list50, fill_color = c("blue", "red", "green", "purple"), stroke_size = 1, text_size = 5)
+ggsave("V50.png", plot = V50, units = "px", width = 1920*4, height = 1080*4, dpi = 600)
+
+```
+
+
+**FOLD CHANGE**
+
+```{r}
+# Create a histogram with ggplot
+p100<-ggplot(sub_resa100, aes(x = reorder(X, log2FoldChange), y = log2FoldChange, fill = log2FoldChange > 0)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change(DESeq2)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+
+# Create a histogram with ggplot
+p200 <-ggplot(sub_anc100, aes(x = reorder(id,fold_change), y = fold_change, fill = fold_change > 0)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change (ANCOMBC)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+# Create a histogram with ggplot
+p300<-ggplot(sub_rad100, aes(x = reorder(id,estimate), y = estimate, fill = estimate > 0)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change (radEmu)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+# Create a histogram with ggplot
+p400 <-ggplot(sub_ald100, aes(x = reorder(id,fold_change), y = fold_change, fill = fold_change > 1)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change (ALDEx2)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+F100<- ggarrange(p100, p200,p300,p400, ncol = 2, nrow = 2)
+
+ggsave("F100.png", plot = F100, units = "px", width = 1920*4, height = 1080*4, dpi = 600)
+
+```
+
+
+for 50
+```{r}
+p1<-ggplot(sub_resa50, aes(x = reorder(X, log2FoldChange), y = log2FoldChange, fill = log2FoldChange > 0)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change(DESeq2)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+
+p2 <-ggplot(sub_anc50, aes(x = reorder(id,fold_change), y = fold_change, fill = fold_change > 0)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change (ANCOMBC)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+p3<-ggplot(sub_rad50, aes(x = reorder(id,estimate), y = estimate, fill = estimate > 0)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change (radEmu)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+p4 <-ggplot(sub_ald50, aes(x = reorder(id,fold_change), y = fold_change, fill = fold_change > 1)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("red", "blue")) +  # Red for negative, blue for positive
+  coord_flip() +  # Flip coordinates for better readability
+  labs(title = "Taxa vs. Log2 Fold Change (ALDEx2)",
+       x = "Taxa",
+       y = "Log2 Fold Change") +
+  theme_minimal()
+
+F50<-ggarrange(p1, p2,p3,p4, ncol = 2, nrow = 2)
+
+ggsave("F50.png", plot = F50, units = "px", width = 1920*4, height = 1080*4, dpi = 600)
+```
+
+```{r}
+packageVersion("radEmu")  # Replace "radEmu" with your package name
+```
+
